@@ -2,7 +2,23 @@
 {% load inventree_extras %}
 
 /* globals
+    calculateTotalPrice,
+    constructForm,
+    constructFormBody,
+    exportFormatOptions,
+    formatCurrency,
+    getFormFieldValue,
     inventreeGet,
+    inventreeLoad,
+    inventreeSave,
+    loadTableFilters,
+    makeCopyButton,
+    makeDeleteButton,
+    makeEditButton,
+    reloadBootstrapTable,
+    renderLink,
+    setupFilterList,
+    wrapButtons,
 */
 
 /* exported
@@ -31,6 +47,7 @@ function extraLineFields(options={}) {
         },
         quantity: {},
         reference: {},
+        description: {},
         price: {
             icon: 'fa-dollar-sign',
         },
@@ -40,6 +57,9 @@ function extraLineFields(options={}) {
         notes: {
             icon: 'fa-sticky-note',
         },
+        link: {
+            icon: 'fa-link',
+        }
     };
 
     if (options.order) {
@@ -134,10 +154,12 @@ function exportOrder(redirect_url, options={}) {
 var TotalPriceRef = ''; // reference to total price field
 var TotalPriceOptions = {}; // options to reload the price
 
+
 function loadOrderTotal(reference, options={}) {
     TotalPriceRef = reference;
     TotalPriceOptions = options;
 }
+
 
 function reloadTotal() {
     inventreeGet(
@@ -149,7 +171,7 @@ function reloadTotal() {
             }
         }
     );
-};
+}
 
 
 /*
@@ -270,6 +292,12 @@ function loadExtraLineTable(options={}) {
                 switchable: false,
             },
             {
+                sortable: false,
+                switchable: true,
+                field: 'description',
+                title: '{% trans "Description" %}',
+            },
+            {
                 sortable: true,
                 switchable: false,
                 field: 'quantity',
@@ -317,6 +345,15 @@ function loadExtraLineTable(options={}) {
             {
                 field: 'notes',
                 title: '{% trans "Notes" %}',
+            },
+            {
+                field: 'link',
+                title: '{% trans "Link" %}',
+                formatter: function(value) {
+                    if (value) {
+                        return renderLink(value, value);
+                    }
+                }
             },
             {
                 field: 'buttons',

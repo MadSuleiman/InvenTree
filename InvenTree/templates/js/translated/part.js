@@ -2,24 +2,57 @@
 {% load inventree_extras %}
 
 /* globals
+    baseCurrency,
     Chart,
     constructForm,
+    constructFormBody,
+    constructInput,
+    convertCurrency,
+    formatCurrency,
+    formatDecimal,
+    formatPriceRange,
+    getCurrencyConversionRates,
+    getFormFieldValue,
+    getTableData,
     global_settings,
+    guessFieldType,
+    handleFormErrors,
+    handleFormSuccess,
     imageHoverIcon,
     inventreeGet,
+    inventreeLoad,
     inventreePut,
-    linkButtonsToSelection,
+    inventreeSave,
     loadTableFilters,
+    makeDeleteButton,
+    makeEditButton,
     makeIconBadge,
     makeIconButton,
+    moment,
+    orderParts,
+    purchaseOrderStatusDisplay,
+    receivePurchaseOrderItems,
+    renderClipboard,
+    renderDate,
     renderLink,
     setFormGroupVisibility,
     setupFilterList,
+    shortenString,
+    showAlertDialog,
+    showApiError,
+    showMessage,
+    showModalSpinner,
+    thumbnailImage,
+    trueFalseLabel,
+    updateFieldValue,
+    withTitle,
+    wrapButtons,
     yesNoLabel,
 */
 
 /* exported
     createPart,
+    createPartCategory,
     deletePart,
     deletePartCategory,
     duplicateBom,
@@ -30,6 +63,7 @@
     loadParametricPartTable,
     loadPartCategoryTable,
     loadPartParameterTable,
+    loadPartParameterTemplateTable,
     loadPartPurchaseOrderTable,
     loadPartTable,
     loadPartTestTemplateTable,
@@ -241,6 +275,10 @@ function partFields(options={}) {
             value: global_settings.PART_COPY_BOM,
         };
 
+        fields.duplicate__copy_notes = {
+            value: true,
+        }
+
         fields.duplicate__copy_parameters = {
             value: global_settings.PART_COPY_PARAMETERS,
         };
@@ -251,10 +289,10 @@ function partFields(options={}) {
 
 
 /*
- * Construct a set of fields for a PartCategory intance
+ * Construct a set of fields for a PartCategory instance
  */
-function categoryFields() {
-    return {
+function categoryFields(options={}) {
+    let fields = {
         parent: {
             help_text: '{% trans "Parent part category" %}',
             required: false,
@@ -276,6 +314,28 @@ function categoryFields() {
             placeholder: 'fas fa-tag',
         },
     };
+
+    if (options.parent) {
+        fields.parent.value = options.parent;
+    }
+
+    return fields;
+}
+
+
+// Create a PartCategory via the API
+function createPartCategory(options={}) {
+    let fields = categoryFields(options);
+
+    constructForm('{% url "api-part-category-list" %}', {
+        fields: fields,
+        method: 'POST',
+        title: '{% trans "Create Part Category" %}',
+        follow: true,
+        persist: true,
+        persistMessage: '{% trans "Create new category after this one" %}',
+        successMessage: '{% trans "Part category created" %}'
+    });
 }
 
 
@@ -349,7 +409,7 @@ function createPart(options={}) {
         fields: partFields(options),
         groups: partGroups(),
         title: '{% trans "Create Part" %}',
-        reloadFormAfterSuccess: true,
+        persist: true,
         persistMessage: '{% trans "Create another part after this one" %}',
         successMessage: '{% trans "Part created successfully" %}',
         onSuccess: function(data) {
@@ -630,7 +690,7 @@ function partStockLabel(part, options={}) {
         elements.push(`{% trans "On Order" %}: ${part.ordering}`);
     }
 
-    // Check for items beeing built
+    // Check for items being built
     if (part.building) {
         elements.push(`{% trans "Building" %}: ${part.building}`);
     }
@@ -792,6 +852,10 @@ function generateStocktakeReport(options={}) {
     if (options.location != null) {
         fields.location = options.location;
     }
+
+    fields.exclude_external = {
+        value: global_settings.STOCKTAKE_EXCLUDE_EXTERNAL,
+    };
 
     if (options.generate_report) {
         fields.generate_report = options.generate_report;
@@ -1228,6 +1292,138 @@ function loadSimplePartTable(table, url, options={}) {
 }
 
 
+/*
+ * Construct a set of fields for the PartParameter model.
+ * Note that the 'data' field changes based on the selected parameter template
+ */
+function partParameterFields(options={}) {
+
+    let fields = {
+        part: {
+            hidden: true,  // Part is set by the parent form
+        },
+        template: {
+            filters: {
+                ordering: 'name',
+            },
+            onEdit: function(value, name, field, opts) {
+                // Callback function when the parameter template is selected.
+                // We rebuild the 'data' field based on the template selection
+
+                let checkbox = false;
+                let choices = [];
+
+                if (value) {
+                    // Request the parameter template data
+                    inventreeGet(`{% url "api-part-parameter-template-list" %}${value}/`, {}, {
+                        async: false,
+                        success: function(response) {
+                            if (response.checkbox) {
+                                // Checkbox input
+                                checkbox = true;
+                            } else if (response.choices) {
+                                // Select input
+                                response.choices.split(',').forEach(function(choice) {
+                                    choice = choice.trim();
+                                    choices.push({
+                                        value: choice,
+                                        display_name: choice,
+                                    });
+                                });
+                            }
+                        }
+                    });
+                }
+
+                // Find the current field element
+                let el = $(opts.modal).find('#id_data');
+
+                // Extract the current value from the field
+                let val = getFormFieldValue('data', {}, opts);
+
+                // Rebuild the field
+                let parameters = {};
+
+                if (checkbox) {
+                    parameters.type = 'boolean';
+                } else if (choices.length > 0) {
+                    parameters.type = 'choice';
+                    parameters.choices = choices;
+                } else {
+                    parameters.type = 'string';
+                }
+
+                let existing_field_type = guessFieldType(el);
+
+                // If the field type has changed, we need to replace the field
+                if (existing_field_type != parameters.type) {
+                    // Construct the new field
+                    let new_field = constructInput('data', parameters, opts);
+
+                    if (guessFieldType(el) == 'boolean') {
+                        // Boolean fields are wrapped in a parent element
+                        el.parent().replaceWith(new_field);
+                    } else {
+                        el.replaceWith(new_field);
+                    }
+                }
+
+                // Update the field parameters in the form options
+                opts.fields.data.type = parameters.type;
+                updateFieldValue('data', val, parameters, opts);
+            }
+        },
+        data: {},
+    };
+
+    if (options.part) {
+        fields.part.value = options.part;
+    }
+
+    return fields;
+}
+
+
+/*
+ * Launch a modal form for creating a new PartParameter object
+ */
+function createPartParameter(part_id, options={}) {
+
+    options.fields = partParameterFields({
+        part: part_id,
+    });
+
+    options.processBeforeUpload = function(data) {
+        // Convert data to string
+        data.data = data.data.toString();
+        return data;
+    }
+
+    options.method = 'POST';
+    options.title = '{% trans "Add Parameter" %}';
+
+    constructForm('{% url "api-part-parameter-list" %}', options);
+}
+
+
+/*
+ * Launch a modal form for editing a PartParameter object
+ */
+function editPartParameter(param_id, options={}) {
+    options.fields = partParameterFields();
+    options.title = '{% trans "Edit Parameter" %}';
+    options.focus = 'data';
+
+    options.processBeforeUpload = function(data) {
+        // Convert data to string
+        data.data = data.data.toString();
+        return data;
+    }
+
+    constructForm(`{% url "api-part-parameter-list" %}${param_id}/`, options);
+}
+
+
 function loadPartParameterTable(table, options) {
 
     var params = options.params || {};
@@ -1264,10 +1460,32 @@ function loadPartParameterTable(table, options) {
                 }
             },
             {
+                field: 'description',
+                title: '{% trans "Description" %}',
+                switchable: true,
+                sortable: false,
+                formatter: function(value, row) {
+                    return row.template_detail.description;
+                }
+            },
+            {
                 field: 'data',
                 title: '{% trans "Value" %}',
                 switchable: false,
                 sortable: true,
+                formatter: function(value, row) {
+                    let template = row.template_detail;
+
+                    if (template.checkbox) {
+                        return trueFalseLabel(value);
+                    }
+
+                    if (row.data_numeric && row.template_detail.units) {
+                        return `<span title='${row.data_numeric} ${row.template_detail.units}'>${row.data}</span>`;
+                    } else {
+                        return row.data;
+                    }
+                }
             },
             {
                 field: 'units',
@@ -1299,12 +1517,8 @@ function loadPartParameterTable(table, options) {
             $(table).find('.button-parameter-edit').click(function() {
                 var pk = $(this).attr('pk');
 
-                constructForm(`{% url "api-part-parameter-list" %}${pk}/`, {
-                    fields: {
-                        data: {},
-                    },
-                    title: '{% trans "Edit Parameter" %}',
-                    refreshTable: table,
+                editPartParameter(pk, {
+                    refreshTable: table
                 });
             });
 
@@ -1318,6 +1532,138 @@ function loadPartParameterTable(table, options) {
                 });
             });
         }
+    });
+}
+
+
+/*
+ * Return a list of fields for a part parameter template
+ */
+function partParameterTemplateFields() {
+    return {
+        name: {},
+        description: {},
+        units: {
+            icon: 'fa-ruler',
+        },
+        choices: {
+            icon: 'fa-th-list',
+        },
+        checkbox: {},
+    };
+}
+
+
+/*
+ * Construct a table showing a list of part parameter templates
+ */
+function loadPartParameterTemplateTable(table, options={}) {
+
+    let params = options.params || {};
+
+    params.ordering = 'name';
+
+    let filters = loadTableFilters('part-parameter-templates', params);
+
+    let filterTarget = options.filterTarget || '#filter-list-parameter-templates';
+
+    setupFilterList('part-parameter-templates', $(table), filterTarget);
+
+    $(table).inventreeTable({
+        url: '{% url "api-part-parameter-template-list" %}',
+        original: params,
+        queryParams: filters,
+        sortable: true,
+        sidePagination: 'server',
+        name: 'part-parameter-templates',
+        formatNoMatches: function() {
+            return '{% trans "No part parameter templates found" %}';
+        },
+        columns: [
+            {
+                field: 'pk',
+                title: '{% trans "ID" %}',
+                visible: false,
+                switchable: false,
+            },
+            {
+                field: 'name',
+                title: '{% trans "Name" %}',
+                sortable: true,
+            },
+            {
+                field: 'units',
+                title: '{% trans "Units" %}',
+                sortable: true,
+                switchable: true,
+            },
+            {
+                field: 'description',
+                title: '{% trans "Description" %}',
+                sortable: false,
+                switchable: true,
+            },
+            {
+                field: 'checkbox',
+                title: '{% trans "Checkbox" %}',
+                sortable: false,
+                switchable: true,
+                formatter: function(value) {
+                    return yesNoLabel(value);
+                }
+            },
+            {
+                field: 'choices',
+                title: '{% trans "Choices" %}',
+                sortable: false,
+                switchable: true,
+            },
+            {
+                formatter: function(value, row, index, field) {
+
+                    let buttons = '';
+
+                    buttons += makeEditButton('template-edit', row.pk, '{% trans "Edit Template" %}');
+                    buttons += makeDeleteButton('template-delete', row.pk, '{% trans "Delete Template" %}');
+
+                    return wrapButtons(buttons);
+                }
+            }
+        ]
+    });
+
+    $(table).on('click', '.template-edit', function() {
+        var button = $(this);
+        var pk = button.attr('pk');
+
+        constructForm(
+            `/api/part/parameter/template/${pk}/`,
+            {
+                fields: partParameterTemplateFields(),
+                title: '{% trans "Edit Part Parameter Template" %}',
+                refreshTable: table,
+            }
+        );
+    });
+
+    $(table).on('click', '.template-delete', function() {
+        var button = $(this);
+        var pk = button.attr('pk');
+
+        var html = `
+        <div class='alert alert-block alert-danger'>
+            {% trans "Any parameters which reference this template will also be deleted" %}
+        </div>`;
+
+        constructForm(
+            `/api/part/parameter/template/${pk}/`,
+            {
+                method: 'DELETE',
+                preFormContent: html,
+                title: '{% trans "Delete Part Parameter Template" %}',
+                refreshTable: table,
+            }
+        );
     });
 }
 
@@ -1424,7 +1770,7 @@ function loadPartPurchaseOrderTable(table, part_id, options={}) {
                     if (row.supplier_part_detail) {
                         var supp = row.supplier_part_detail;
 
-                        return renderLink(supp.SKU, `/supplier-part/${supp.pk}/`);
+                        return renderClipboard(renderLink(supp.SKU, `/supplier-part/${supp.pk}/`));
                     } else {
                         return '-';
                     }
@@ -1437,7 +1783,7 @@ function loadPartPurchaseOrderTable(table, part_id, options={}) {
                 formatter: function(value, row) {
                     if (row.supplier_part_detail && row.supplier_part_detail.manufacturer_part_detail) {
                         var manu = row.supplier_part_detail.manufacturer_part_detail;
-                        return renderLink(manu.MPN, `/manufacturer-part/${manu.pk}/`);
+                        return renderClipboard(renderLink(manu.MPN, `/manufacturer-part/${manu.pk}/`));
                     }
                 }
             },
@@ -1447,13 +1793,12 @@ function loadPartPurchaseOrderTable(table, part_id, options={}) {
                 formatter: function(value, row) {
                     let data = value;
 
-                    if (row.supplier_part_detail.pack_size != 1.0) {
-                        let pack_size = row.supplier_part_detail.pack_size;
-                        let total = value * pack_size;
+                    if (row.supplier_part_detail.pack_quantity_native != 1.0) {
+                        let total = value * row.supplier_part_detail.pack_quantity_native;
 
                         data += makeIconBadge(
                             'fa-info-circle icon-blue',
-                            `{% trans "Pack Quantity" %}: ${pack_size} - {% trans "Total Quantity" %}: ${total}`
+                            `{% trans "Pack Quantity" %}: ${row.pack_quantity} - {% trans "Total Quantity" %}: ${total}`
                         );
                     }
 
@@ -1506,10 +1851,9 @@ function loadPartPurchaseOrderTable(table, part_id, options={}) {
                 formatter: function(value, row) {
                     var data = value;
 
-                    if (value > 0 && row.supplier_part_detail.pack_size != 1.0) {
-                        var pack_size = row.supplier_part_detail.pack_size;
-                        var total = value * pack_size;
-                        data += `<span class='fas fa-info-circle icon-blue float-right' title='{% trans "Pack Quantity" %}: ${pack_size} - {% trans "Total Quantity" %}: ${total}'></span>`;
+                    if (value > 0 && row.supplier_part_detail.pack_quantity_native != 1.0) {
+                        let total = value * row.supplier_part_detail.pack_quantity_native;
+                        data += `<span class='fas fa-info-circle icon-blue float-right' title='{% trans "Pack Quantity" %}: ${row.pack_quantity} - {% trans "Total Quantity" %}: ${total}'></span>`;
                     }
 
                     return data;
@@ -1532,7 +1876,7 @@ function loadPartPurchaseOrderTable(table, part_id, options={}) {
                 formatter: function(value, row) {
 
                     if (row.received >= row.quantity) {
-                        // Already recevied
+                        // Already received
                         return `<span class='badge bg-success rounded-pill'>{% trans "Received" %}</span>`;
                     } else if (row.order_detail && row.order_detail.status == {{ PurchaseOrderStatus.PLACED }}) {
                         let html = '';
@@ -1560,11 +1904,7 @@ function loadRelatedPartsTable(table, part_id, options={}) {
 
     options.params.part = part_id;
 
-    var filters = {};
-
-    for (var key in options.params) {
-        filters[key] = options.params[key];
-    }
+    var filters = Object.assign({}, options.params);
 
     setupFilterList('related', $(table), options.filterTarget);
 
@@ -1640,6 +1980,12 @@ function loadRelatedPartsTable(table, part_id, options={}) {
  */
 function loadParametricPartTable(table, options={}) {
 
+    options.params = options.params || {};
+
+    options.params['parameters'] = true;
+
+    let filters = loadTableFilters('parameters', options.params);
+
     setupFilterList('parameters', $(table), '#filter-list-parameters');
 
     var columns = [
@@ -1668,38 +2014,63 @@ function loadParametricPartTable(table, options={}) {
             async: false,
             success: function(response) {
                 for (var template of response) {
+
+                    let template_name = template.name;
+
+                    if (template.units) {
+                        template_name += ` [${template.units}]`;
+                    }
+
+                    let fmt_func = null;
+
+                    if (template.checkbox) {
+                        fmt_func = function(value) {
+                            if (value == null) {
+                                return null;
+                            } else {
+                                return trueFalseLabel(value);
+                            }
+                        }
+                    }
+
                     columns.push({
                         field: `parameter_${template.pk}`,
-                        title: template.name,
+                        title: template_name,
                         switchable: true,
-                        sortable: false,
+                        sortable: true,
                         filterControl: 'input',
+                        visible: false,
+                        formatter: fmt_func,
                     });
                 }
             }
         }
     );
 
-    // TODO: Re-enable filter control for parameter values
 
     $(table).inventreeTable({
         url: '{% url "api-part-list" %}',
-        queryParams: {
-            category: options.category,
-            cascade: true,
-            parameters: true,
-        },
+        queryParams: filters,
+        original: options.params,
         groupBy: false,
         name: options.name || 'part-parameters',
         formatNoMatches: function() {
             return '{% trans "No parts found" %}';
         },
+        // TODO: Re-enable filter control for parameter values
+        // Ref: https://github.com/inventree/InvenTree/issues/4851
+        // filterControl: true,
+        // showFilterControlSwitch: true,
+        // sortSelectOptions: true,
         columns: columns,
         showColumns: true,
         sidePagination: 'server',
         idField: 'pk',
         uniqueId: 'pk',
         onLoadSuccess: function(response) {
+
+            // Display columns as we receive data from them
+            let activated_columns = [];
 
             // Data may be returned paginated, in which case we preference response.results
             var data = response.results || response;
@@ -1709,7 +2080,14 @@ function loadParametricPartTable(table, options={}) {
 
                 // Make each parameter accessible, based on the "template" columns
                 row.parameters.forEach(function(parameter) {
-                    row[`parameter_${parameter.template}`] = parameter.data;
+                    let col_name = `parameter_${parameter.template}`;
+                    row[col_name] = parameter.data;
+
+                    // Display the column if it is not already displayed
+                    if (!activated_columns.includes(col_name)) {
+                        activated_columns.push(col_name);
+                        $(table).bootstrapTable('showColumn', col_name);
+                    }
                 });
 
                 data[idx] = row;
@@ -1728,8 +2106,8 @@ function loadParametricPartTable(table, options={}) {
 }
 
 
+// Generate a "grid tile" view for a particular part
 function partGridTile(part) {
-    // Generate a "grid tile" view for a particular part
 
     // Rows for table view
     var rows = '';
@@ -1785,6 +2163,69 @@ function partGridTile(part) {
 }
 
 
+/*
+ * Update the category for a set of parts
+ */
+function setPartCategory(data, options={}) {
+
+    let parts = [];
+
+    data.forEach(function(item) {
+        parts.push(item.pk);
+    });
+
+    var html = `
+    <div class='alert alert-block alert-info'>
+        {% trans "Set the part category for the selected parts" %}
+    </div>
+    `;
+
+    constructForm('{% url "api-part-change-category" %}',{
+        title: '{% trans "Set Part Category" %}',
+        method: 'POST',
+        preFormContent: html,
+        fields: {
+            category: {},
+        },
+        processBeforeUpload: function(data) {
+            data.parts = parts;
+            return data;
+        },
+        onSuccess: function() {
+            $(options.table).bootstrapTable('refresh');
+        }
+    });
+}
+
+
+/*
+ * Construct a set of custom actions for the part table
+ */
+function makePartActions(table) {
+
+    return [
+        {
+            label: 'set-category',
+            title: '{% trans "Set category" %}',
+            icon: 'fa-sitemap',
+            permission: 'part.change',
+            callback: function(data) {
+                setPartCategory(data, {table: table});
+            }
+        },
+        {
+            label: 'order',
+            title: '{% trans "Order parts" %}',
+            icon: 'fa-shopping-cart',
+            permission: 'purchase_order.add',
+            callback: function(data) {
+                orderParts(data);
+            },
+        }
+    ]
+}
+
+
 /* Load part listing data into specified table.
  *
  * Args:
@@ -1799,20 +2240,39 @@ function partGridTile(part) {
  */
 function loadPartTable(table, url, options={}) {
 
+    options.params = options.params || {};
+
+    let table_name = options.name || 'parts';
+
     // Ensure category detail is included
     options.params['category_detail'] = true;
 
-    var params = options.params || {};
+    let filters = {};
 
-    var filters = loadTableFilters('parts', options.params);
+    if (!options.disableFilters) {
+        filters = loadTableFilters(table_name, options.params);
 
-    setupFilterList('parts', $(table), options.filterTarget, {
-        download: true,
-        labels: {
-            url: '{% url "api-part-label-list" %}',
-            key: 'part',
-        }
-    });
+        setupFilterList('parts', $(table), options.filterTarget, {
+            download: true,
+            labels: {
+                url: '{% url "api-part-label-list" %}',
+                key: 'part',
+            },
+            singular_name: '{% trans "part" %}',
+            plural_name: '{% trans "parts" %}',
+            custom_actions: [
+                {
+                    label: 'parts',
+                    icon: 'fa-tools',
+                    title: '{% trans "Part actions" %}',
+                    actions: makePartActions(table),
+                }
+            ]
+        });
+    }
+
+    // Update fields with passed parameters
+    filters = Object.assign(filters, options.params);
 
     var columns = [
         {
@@ -1880,6 +2340,12 @@ function loadPartTable(table, url, options={}) {
     });
 
     columns.push({
+        field: 'units',
+        title: '{% trans "Units" %}',
+        sortable: true,
+    });
+
+    columns.push({
         sortName: 'category',
         field: 'category_detail',
         title: '{% trans "Category" %}',
@@ -1910,6 +2376,38 @@ function loadPartTable(table, url, options={}) {
             });
 
             return text;
+        },
+        footerFormatter: function(data) {
+            // Display "total" stock quantity of all rendered rows
+            // Requires that all parts have the same base units!
+
+            let total = 0;
+            let units = new Set();
+
+            data.forEach(function(row) {
+                units.add(row.units || null);
+                if (row.total_in_stock != null) {
+                    total += row.total_in_stock;
+                }
+            });
+
+            if (data.length == 0) {
+                return '-';
+            } else if (units.size > 1) {
+                return '-';
+            } else {
+                let output = `${total}`;
+
+                if (units.size == 1) {
+                    let unit = units.values().next().value;
+
+                    if (unit) {
+                        output += ` [${unit}]`;
+                    }
+                }
+
+                return output;
+            }
         }
     });
 
@@ -1972,10 +2470,10 @@ function loadPartTable(table, url, options={}) {
     $(table).inventreeTable({
         url: url,
         method: 'get',
+        name: table_name,
         queryParams: filters,
         groupBy: false,
-        name: options.name || 'part',
-        original: params,
+        original: options.params,
         sidePagination: 'server',
         pagination: 'true',
         formatNoMatches: function() {
@@ -1985,6 +2483,7 @@ function loadPartTable(table, url, options={}) {
         showColumns: true,
         showCustomView: grid_view,
         showCustomViewButton: false,
+        showFooter: true,
         onPostBody: function() {
             grid_view = inventreeLoad('part-grid-view') == 1;
             if (grid_view) {
@@ -2054,97 +2553,6 @@ function loadPartTable(table, url, options={}) {
             return html;
         }
     });
-
-    if (options.buttons) {
-        linkButtonsToSelection($(table), options.buttons);
-    }
-
-    /* Button callbacks for part table buttons */
-
-    // Callback function for the "order parts" button
-    $('#multi-part-order').click(function() {
-        var selections = getTableData(table);
-
-        var parts = [];
-
-        selections.forEach(function(part) {
-            parts.push(part);
-        });
-
-        orderParts(parts, {});
-    });
-
-    // Callback function for the "set category" button
-    $('#multi-part-category').click(function() {
-        var selections = getTableData(table);
-        var parts = [];
-
-        selections.forEach(function(item) {
-            parts.push(item.pk);
-        });
-
-        var html = `
-        <div class='alert alert-block alert-info'>
-            {% trans "Set the part category for the selected parts" %}
-        </div>
-        `;
-
-        constructFormBody({}, {
-            title: '{% trans "Set Part Category" %}',
-            preFormContent: html,
-            fields: {
-                category: {
-                    label: '{% trans "Category" %}',
-                    help_text: '{% trans "Select Part Category" %}',
-                    required: true,
-                    type: 'related field',
-                    model: 'partcategory',
-                    api_url: '{% url "api-part-category-list" %}',
-                }
-            },
-            onSubmit: function(fields, opts) {
-                var category = getFormFieldValue('category', fields['category'], opts);
-
-                if (category == null) {
-                    handleFormErrors(
-                        {
-                            'category': ['{% trans "Category is required" %}']
-                        },
-                        opts.fields,
-                        opts
-                    );
-                    return;
-                }
-
-                // Set the category for each part in sequence
-                function setCategory() {
-                    if (parts.length > 0) {
-                        var part = parts.shift();
-
-                        inventreePut(
-                            `{% url "api-part-list" %}${part}/`,
-                            {
-                                category: category,
-                            },
-                            {
-                                method: 'PATCH',
-                                complete: setCategory,
-                            }
-                        );
-                    } else {
-                        // We are done!
-                        $(opts.modal).modal('hide');
-
-                        $(table).bootstrapTable('refresh');
-                    }
-                };
-
-                // Start the ball rolling
-                showModalSpinner(opts.modal);
-                setCategory();
-            },
-        });
-    });
 }
 
 
@@ -2207,6 +2615,9 @@ function loadPartCategoryTable(table, options) {
         treeShowField: 'name',
         parentIdField: tree_view ? 'parent' : null,
         method: 'get',
+        formatNoMatches: function() {
+            return '{% trans "No subcategories found" %}';
+        },
         url: options.url || '{% url "api-part-category-list" %}',
         queryParams: filters,
         disablePagination: tree_view,
@@ -2409,10 +2820,7 @@ function loadPartTestTemplateTable(table, options) {
 
     setupFilterList('parttests', table, filterListElement);
 
-    // Override the default values, or add new ones
-    for (var key in params) {
-        filters[key] = params[key];
-    }
+    filters = Object.assign(filters, params);
 
     table.inventreeTable({
         method: 'get',

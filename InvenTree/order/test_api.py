@@ -13,13 +13,13 @@ from djmoney.money import Money
 from icalendar import Calendar
 from rest_framework import status
 
-import order.models as models
 from common.settings import currency_codes
 from company.models import Company
-from InvenTree.api_tester import InvenTreeAPITestCase
 from InvenTree.status_codes import (PurchaseOrderStatus, ReturnOrderLineStatus,
                                     ReturnOrderStatus, SalesOrderStatus,
-                                    StockStatus)
+                                    SalesOrderStatusGroups, StockStatus)
+from InvenTree.unit_test import InvenTreeAPITestCase
+from order import models
 from part.models import Part
 from stock.models import StockItem
 
@@ -59,6 +59,50 @@ class PurchaseOrderTest(OrderTest):
     """Tests for the PurchaseOrder API."""
 
     LIST_URL = reverse('api-po-list')
+
+    def test_options(self):
+        """Test the PurchaseOrder OPTIONS endpoint."""
+
+        self.assignRole('purchase_order.add')
+
+        response = self.options(self.LIST_URL, expected_code=200)
+
+        data = response.data
+        self.assertEqual(data['name'], 'Purchase Order List')
+
+        post = data['actions']['POST']
+
+        def check_options(data, field_name, spec):
+            """Helper function to check that the options are configured correctly."""
+            field_data = data[field_name]
+
+            for k, v in spec.items():
+                self.assertIn(k, field_data)
+                self.assertEqual(field_data[k], v)
+
+        # Checks for the 'order_currency' field
+        check_options(post, 'order_currency', {
+            'type': 'choice',
+            'required': False,
+            'read_only': False,
+            'label': 'Order Currency',
+            'help_text': 'Currency for this order (leave blank to use company default)',
+        })
+
+        # Checks for the 'reference' field
+        check_options(post, 'reference', {
+            'type': 'string',
+            'required': True,
+            'read_only': False,
+            'label': 'Reference',
+        })
+
+        # Checks for the 'supplier' field
+        check_options(post, 'supplier', {
+            'type': 'related field',
+            'required': True,
+            'api_url': '/api/company/',
+        })
 
     def test_po_list(self):
         """Test the PurchaseOrder list API endpoint"""
@@ -155,7 +199,7 @@ class PurchaseOrderTest(OrderTest):
 
                 for result in response.data['results']:
                     self.assertIn('total_price', result)
-                    self.assertIn('total_price_currency', result)
+                    self.assertIn('order_currency', result)
 
     def test_overdue(self):
         """Test "overdue" status."""
@@ -323,13 +367,18 @@ class PurchaseOrderTest(OrderTest):
 
         self.assertTrue(po.lines.count() > 0)
 
+        lines = []
+
         # Add some extra line items to this order
         for idx in range(5):
-            models.PurchaseOrderExtraLine.objects.create(
+            lines.append(models.PurchaseOrderExtraLine(
                 order=po,
                 quantity=idx + 10,
                 reference='some reference',
-            )
+            ))
+
+        # bulk create orders
+        models.PurchaseOrderExtraLine.objects.bulk_create(lines)
 
         data = self.get(reverse('api-po-detail', kwargs={'pk': 1})).data
 
@@ -460,23 +509,6 @@ class PurchaseOrderTest(OrderTest):
 
         self.assertEqual(po.status, PurchaseOrderStatus.PLACED)
 
-    def test_po_metadata(self):
-        """Test the 'metadata' endpoint for the PurchaseOrder model"""
-        url = reverse('api-po-metadata', kwargs={'pk': 1})
-
-        self.patch(
-            url,
-            {
-                'metadata': {
-                    'yam': 'yum',
-                }
-            },
-            expected_code=200
-        )
-
-        order = models.PurchaseOrder.objects.get(pk=1)
-        self.assertEqual(order.get_metadata('yam'), 'yum')
-
     def test_po_calendar(self):
         """Test the calendar export endpoint"""
 
@@ -530,7 +562,7 @@ class PurchaseOrderTest(OrderTest):
         # Test without completed orders
         response = self.get(url, expected_code=200, format=None)
 
-        number_orders = len(models.PurchaseOrder.objects.filter(target_date__isnull=False).filter(status__lt=PurchaseOrderStatus.COMPLETE))
+        number_orders = len(models.PurchaseOrder.objects.filter(target_date__isnull=False).filter(status__lt=PurchaseOrderStatus.COMPLETE.value))
 
         # Transform content to a Calendar object
         calendar = Calendar.from_ical(response.content)
@@ -665,10 +697,10 @@ class PurchaseOrderDownloadTest(OrderTest):
             },
             expected_code=200,
             expected_fn='InvenTree_PurchaseOrders.csv',
-        ) as fo:
+        ) as file:
 
             data = self.process_csv(
-                fo,
+                file,
                 required_cols=self.required_cols,
                 excluded_cols=self.excluded_cols,
                 required_rows=models.PurchaseOrder.objects.count()
@@ -690,9 +722,9 @@ class PurchaseOrderDownloadTest(OrderTest):
             decode=False,
             expected_code=200,
             expected_fn='InvenTree_PurchaseOrderItems.xlsx',
-        ) as fo:
+        ) as file:
 
-            self.assertTrue(isinstance(fo, io.BytesIO))
+            self.assertTrue(isinstance(file, io.BytesIO))
 
 
 class PurchaseOrderReceiveTest(OrderTest):
@@ -711,7 +743,7 @@ class PurchaseOrderReceiveTest(OrderTest):
 
         # Mark the order as "placed" so we can receive line items
         order = models.PurchaseOrder.objects.get(pk=1)
-        order.status = PurchaseOrderStatus.PLACED
+        order.status = PurchaseOrderStatus.PLACED.value
         order.save()
 
     def test_empty(self):
@@ -837,8 +869,7 @@ class PurchaseOrderReceiveTest(OrderTest):
         """
         # Set stock item barcode
         item = StockItem.objects.get(pk=1)
-        item.barcode_hash = 'MY-BARCODE-HASH'
-        item.save()
+        item.assign_barcode(barcode_data='MY-BARCODE-HASH')
 
         response = self.post(
             self.url,
@@ -913,7 +944,7 @@ class PurchaseOrderReceiveTest(OrderTest):
         # Before posting "valid" data, we will mark the purchase order as "pending"
         # In this case we do expect an error!
         order = models.PurchaseOrder.objects.get(pk=1)
-        order.status = PurchaseOrderStatus.PENDING
+        order.status = PurchaseOrderStatus.PENDING.value
         order.save()
 
         response = self.post(
@@ -925,7 +956,7 @@ class PurchaseOrderReceiveTest(OrderTest):
         self.assertIn('can only be received against', str(response.data))
 
         # Now, set the PurchaseOrder back to "PLACED" so the items can be received
-        order.status = PurchaseOrderStatus.PLACED
+        order.status = PurchaseOrderStatus.PLACED.value
         order.save()
 
         # Receive two separate line items against this order
@@ -956,8 +987,8 @@ class PurchaseOrderReceiveTest(OrderTest):
         self.assertEqual(stock_2.last().location.pk, 2)
 
         # Barcodes should have been assigned to the stock items
-        self.assertTrue(StockItem.objects.filter(barcode_hash='MY-UNIQUE-BARCODE-123').exists())
-        self.assertTrue(StockItem.objects.filter(barcode_hash='MY-UNIQUE-BARCODE-456').exists())
+        self.assertTrue(StockItem.objects.filter(barcode_data='MY-UNIQUE-BARCODE-123').exists())
+        self.assertTrue(StockItem.objects.filter(barcode_data='MY-UNIQUE-BARCODE-456').exists())
 
     def test_batch_code(self):
         """Test that we can supply a 'batch code' when receiving items."""
@@ -1134,7 +1165,7 @@ class SalesOrderTest(OrderTest):
                 idx += 1
 
             # Create some extra lines against this order
-            for ii in range(3):
+            for _ in range(3):
                 extra_lines.append(
                     models.SalesOrderExtraLine(
                         order=so,
@@ -1158,7 +1189,7 @@ class SalesOrderTest(OrderTest):
 
                 for result in response.data['results']:
                     self.assertIn('total_price', result)
-                    self.assertIn('total_price_currency', result)
+                    self.assertIn('order_currency', result)
 
     def test_overdue(self):
         """Test "overdue" status."""
@@ -1326,23 +1357,6 @@ class SalesOrderTest(OrderTest):
 
         self.assertEqual(so.status, SalesOrderStatus.CANCELLED)
 
-    def test_so_metadata(self):
-        """Test the 'metadata' API endpoint for the SalesOrder model"""
-        url = reverse('api-so-metadata', kwargs={'pk': 1})
-
-        self.patch(
-            url,
-            {
-                'metadata': {
-                    'xyz': 'abc',
-                }
-            },
-            expected_code=200
-        )
-
-        order = models.SalesOrder.objects.get(pk=1)
-        self.assertEqual(order.get_metadata('xyz'), 'abc')
-
     def test_so_calendar(self):
         """Test the calendar export endpoint"""
 
@@ -1374,7 +1388,7 @@ class SalesOrderTest(OrderTest):
         # Test without completed orders
         response = self.get(url, expected_code=200, format=None)
 
-        number_orders = len(models.SalesOrder.objects.filter(target_date__isnull=False).filter(status__lt=SalesOrderStatus.SHIPPED))
+        number_orders = len(models.SalesOrder.objects.filter(target_date__isnull=False).filter(status__lt=SalesOrderStatus.SHIPPED.value))
 
         # Transform content to a Calendar object
         calendar = Calendar.from_ical(response.content)
@@ -1403,6 +1417,28 @@ class SalesOrderTest(OrderTest):
 
         self.assertGreaterEqual(n_events, 1)
         self.assertEqual(number_orders_incl_complete, n_events)
+
+    def test_export(self):
+        """Test we can export the SalesOrder list"""
+
+        n = models.SalesOrder.objects.count()
+
+        # Check there are some sales orders
+        self.assertGreater(n, 0)
+
+        for order in models.SalesOrder.objects.all():
+            # Reconstruct the total price
+            order.save()
+
+        # Download file, check we get a 200 response
+        for fmt in ['csv', 'xls', 'xlsx']:
+            self.download_file(
+                reverse('api-so-list'),
+                {'export': fmt},
+                decode=True if fmt == 'csv' else False,
+                expected_code=200,
+                expected_fn=f"InvenTree_SalesOrders.{fmt}"
+            )
 
 
 class SalesOrderLineItemTest(OrderTest):
@@ -1522,8 +1558,8 @@ class SalesOrderDownloadTest(OrderTest):
             expected_code=200,
             expected_fn='InvenTree_SalesOrders.xls',
             decode=False,
-        ) as fo:
-            self.assertTrue(isinstance(fo, io.BytesIO))
+        ) as file:
+            self.assertTrue(isinstance(file, io.BytesIO))
 
     def test_download_csv(self):
         """Tesst that the list of sales orders can be downloaded as a .csv file"""
@@ -1553,10 +1589,10 @@ class SalesOrderDownloadTest(OrderTest):
             expected_code=200,
             expected_fn='InvenTree_SalesOrders.csv',
             decode=True
-        ) as fo:
+        ) as file:
 
             data = self.process_csv(
-                fo,
+                file,
                 required_cols=required_cols,
                 excluded_cols=excluded_cols,
                 required_rows=models.SalesOrder.objects.count()
@@ -1579,13 +1615,13 @@ class SalesOrderDownloadTest(OrderTest):
             expected_code=200,
             expected_fn='InvenTree_SalesOrders.tsv',
             decode=True,
-        ) as fo:
+        ) as file:
 
             self.process_csv(
-                fo,
+                file,
                 required_cols=required_cols,
                 excluded_cols=excluded_cols,
-                required_rows=models.SalesOrder.objects.filter(status__in=SalesOrderStatus.OPEN).count(),
+                required_rows=models.SalesOrder.objects.filter(status__in=SalesOrderStatusGroups.OPEN).count(),
                 delimiter='\t',
             )
 
@@ -1759,6 +1795,7 @@ class SalesOrderAllocateTest(OrderTest):
                 'link': 'http://test.com/link.html',
                 'tracking_number': 'TRK12345',
                 'shipment_date': '2020-12-05',
+                'delivery_date': '2023-12-05',
             },
             expected_code=201,
         )
@@ -1769,10 +1806,55 @@ class SalesOrderAllocateTest(OrderTest):
         self.assertEqual(self.shipment.tracking_number, 'TRK12345')
         self.assertEqual(self.shipment.invoice_number, 'INV01234')
         self.assertEqual(self.shipment.link, 'http://test.com/link.html')
+        self.assertEqual(self.shipment.delivery_date, datetime(2023, 12, 5).date())
+        self.assertTrue(self.shipment.is_delivered())
+
+    def test_shipment_deliverydate(self):
+        """Test delivery date functions via API."""
+        url = reverse('api-so-shipment-detail', kwargs={'pk': self.shipment.pk})
+
+        # Attempt remove delivery_date from shipment
+        response = self.patch(
+            url,
+            {
+                'delivery_date': None,
+            },
+            expected_code=200,
+        )
+
+        # Shipment should not be marked as delivered
+        self.assertFalse(self.shipment.is_delivered())
+
+        # Attempt to set delivery date
+        response = self.patch(
+            url,
+            {
+                'delivery_date': 'asfasd',
+            },
+            expected_code=400,
+        )
+
+        self.assertIn('Date has wrong format', str(response.data))
+
+        response = self.patch(
+            url,
+            {
+                'delivery_date': '2023-05-15',
+            },
+            expected_code=200,
+        )
+        self.shipment.refresh_from_db()
+
+        # Shipment should now be marked as delivered
+        self.assertTrue(self.shipment.is_delivered())
+        self.assertEqual(self.shipment.delivery_date, datetime(2023, 5, 15).date())
 
     def test_sales_order_shipment_list(self):
         """Test the SalesOrderShipment list API endpoint"""
         url = reverse('api-so-shipment-list')
+
+        # Count before creation
+        countbefore = models.SalesOrderShipment.objects.count()
 
         # Create some new shipments via the API
         for order in models.SalesOrder.objects.all():
@@ -1803,7 +1885,7 @@ class SalesOrderAllocateTest(OrderTest):
         # List *all* shipments
         response = self.get(url, expected_code=200)
 
-        self.assertEqual(len(response.data), 1 + 3 * models.SalesOrder.objects.count())
+        self.assertEqual(len(response.data), countbefore + 3 * models.SalesOrder.objects.count())
 
 
 class ReturnOrderTests(InvenTreeAPITestCase):
@@ -2087,3 +2169,83 @@ class ReturnOrderTests(InvenTreeAPITestCase):
         self.assertEqual(deltas['customer'], customer.pk)
         self.assertEqual(deltas['location'], 1)
         self.assertEqual(deltas['returnorder'], rma.pk)
+
+    def test_ro_calendar(self):
+        """Test the calendar export endpoint"""
+
+        # Full test is in test_po_calendar. Since these use the same backend, test only
+        # that the endpoint is available
+        url = reverse('api-po-so-calendar', kwargs={'ordertype': 'return-order'})
+
+        # Test without completed orders
+        response = self.get(url, expected_code=200, format=None)
+        calendar = Calendar.from_ical(response.content)
+        self.assertIsInstance(calendar, Calendar)
+
+
+class OrderMetadataAPITest(InvenTreeAPITestCase):
+    """Unit tests for the various metadata endpoints of API."""
+
+    fixtures = [
+        'category',
+        'part',
+        'company',
+        'location',
+        'supplier_part',
+        'stock',
+        'order',
+        'sales_order',
+        'return_order',
+    ]
+
+    roles = [
+        'purchase_order.change',
+        'sales_order.change',
+        'return_order.change',
+    ]
+
+    def metatester(self, apikey, model):
+        """Generic tester"""
+
+        modeldata = model.objects.first()
+
+        # Useless test unless a model object is found
+        self.assertIsNotNone(modeldata)
+
+        url = reverse(apikey, kwargs={'pk': modeldata.pk})
+
+        # Metadata is initially null
+        self.assertIsNone(modeldata.metadata)
+
+        numstr = f'12{len(apikey)}'
+
+        self.patch(
+            url,
+            {
+                'metadata': {
+                    f'abc-{numstr}': f'xyz-{apikey}-{numstr}',
+                }
+            },
+            expected_code=200
+        )
+
+        # Refresh
+        modeldata.refresh_from_db()
+        self.assertEqual(modeldata.get_metadata(f'abc-{numstr}'), f'xyz-{apikey}-{numstr}')
+
+    def test_metadata(self):
+        """Test all endpoints"""
+
+        for apikey, model in {
+            'api-po-metadata': models.PurchaseOrder,
+            'api-po-line-metadata': models.PurchaseOrderLineItem,
+            'api-po-extra-line-metadata': models.PurchaseOrderExtraLine,
+            'api-so-shipment-metadata': models.SalesOrderShipment,
+            'api-so-metadata': models.SalesOrder,
+            'api-so-line-metadata': models.SalesOrderLineItem,
+            'api-so-extra-line-metadata': models.SalesOrderExtraLine,
+            'api-return-order-metadata': models.ReturnOrder,
+            'api-return-order-line-metadata': models.ReturnOrderLineItem,
+            'api-return-order-extra-line-metadata': models.ReturnOrderExtraLine,
+        }.items():
+            self.metatester(apikey, model)

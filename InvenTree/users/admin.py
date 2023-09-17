@@ -21,7 +21,7 @@ class RuleSetInline(admin.TabularInline):
     can_delete = False
     verbose_name = 'Ruleset'
     verbose_plural_name = 'Rulesets'
-    fields = ['name'] + [option for option in RuleSet.RULE_OPTIONS]
+    fields = ['name'] + list(RuleSet.RULE_OPTIONS)
     readonly_fields = ['name']
     max_num = len(RuleSet.RULESET_CHOICES)
     min_num = 1
@@ -98,7 +98,7 @@ class RoleGroupAdmin(admin.ModelAdmin):  # pragma: no cover
                 break
 
         def append_permission_level(permission_level, next_level):
-            """Appen permission level"""
+            """Append permission level"""
             if not permission_level:
                 return next_level
 

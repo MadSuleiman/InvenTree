@@ -3,13 +3,13 @@
 from django.contrib import admin
 from django.utils.translation import gettext_lazy as _
 
-import import_export.widgets as widgets
+from import_export import widgets
 from import_export.admin import ImportExportModelAdmin
 from import_export.fields import Field
 
-import part.models as models
 from company.models import SupplierPart
 from InvenTree.admin import InvenTreeResource
+from part import models
 from stock.models import StockLocation
 
 
@@ -43,7 +43,7 @@ class PartResource(InvenTreeResource):
     category_name = Field(attribute='category__name', column_name=_('Category Name'), readonly=True)
     default_location = Field(attribute='default_location', column_name=_('Default Location ID'), widget=widgets.ForeignKeyWidget(StockLocation))
     default_supplier = Field(attribute='default_supplier', column_name=_('Default Supplier ID'), widget=widgets.ForeignKeyWidget(SupplierPart))
-    variant_of = Field(attribute='variant_of', column_name=('Variant Of'), widget=widgets.ForeignKeyWidget(models.Part))
+    variant_of = Field(attribute='variant_of', column_name=_('Variant Of'), widget=widgets.ForeignKeyWidget(models.Part))
     minimum_stock = Field(attribute='minimum_stock', column_name=_('Minimum Stock'))
 
     # Part Attributes
@@ -122,9 +122,9 @@ class PartImportResource(InvenTreeResource):
         ]
 
 
-class StocktakeInline(admin.TabularInline):
-    """Inline for part stocktake data"""
-    model = models.PartStocktake
+class PartParameterInline(admin.TabularInline):
+    """Inline for part parameter data"""
+    model = models.PartParameter
 
 
 class PartAdmin(ImportExportModelAdmin):
@@ -146,7 +146,7 @@ class PartAdmin(ImportExportModelAdmin):
     ]
 
     inlines = [
-        StocktakeInline,
+        PartParameterInline,
     ]
 
 
@@ -189,7 +189,7 @@ class PartCategoryResource(InvenTreeResource):
             'icon',
         ]
 
-    id = Field(attribute='pk', column_name=_('Category ID'))
+    id = Field(attribute='pk', column_name=_('Category ID'), widget=widgets.IntegerWidget())
     name = Field(attribute='name', column_name=_('Category Name'))
     description = Field(attribute='description', column_name=_('Description'))
     parent = Field(attribute='parent', column_name=_('Parent ID'), widget=widgets.ForeignKeyWidget(models.PartCategory))
@@ -264,7 +264,7 @@ class BomItemResource(InvenTreeResource):
 
     level = Field(attribute='level', column_name=_('BOM Level'), readonly=True)
 
-    bom_id = Field(attribute='pk', column_name=_('BOM Item ID'))
+    bom_id = Field(attribute='pk', column_name=_('BOM Item ID'), widget=widgets.IntegerWidget())
 
     # ID of the parent part
     parent_part_id = Field(attribute='part', column_name=_('Parent ID'), widget=widgets.ForeignKeyWidget(models.Part))

@@ -2,8 +2,11 @@
 
 /* globals
     blankImage,
+    partStockLabel,
+    renderLink,
     select2Thumbnail
-    shortenString
+    shortenString,
+    user_settings
 */
 
 /* exported
@@ -11,11 +14,13 @@
     renderBuild,
     renderCompany,
     renderContact,
+    renderAddress,
     renderGroup,
     renderManufacturerPart,
     renderOwner,
     renderPart,
     renderPartCategory,
+    renderProjectCode,
     renderReturnOrder,
     renderStockItem,
     renderStockLocation,
@@ -48,6 +53,8 @@ function getModelRenderer(model) {
         return renderCompany;
     case 'contact':
         return renderContact;
+    case 'address':
+        return renderAddress;
     case 'stockitem':
         return renderStockItem;
     case 'stocklocation':
@@ -78,6 +85,8 @@ function getModelRenderer(model) {
         return renderUser;
     case 'group':
         return renderGroup;
+    case 'projectcode':
+        return renderProjectCode;
     default:
         // Un-handled model type
         console.error(`Rendering not implemented for model '${model}'`);
@@ -120,15 +129,19 @@ function renderModel(data, options={}) {
         }
     }
 
-    let text = `<span>${data.text}</span>`;
+    let text = data.text;
+
+    if (showLink && data.url) {
+        text = renderLink(text, data.url);
+    }
+
+    text = `<span>${text}</span>`;
 
     if (data.textSecondary) {
         text += ` - <small><em>${data.textSecondary}</em></small>`;
     }
 
-    if (showLink && data.url) {
-        text = renderLink(text, data.url);
-    }
+
 
     html += text;
 
@@ -161,6 +174,17 @@ function renderContact(data, parameters={}) {
     return renderModel(
         {
             text: data.name,
+        },
+        parameters
+    );
+}
+
+
+// Renderer for "Address" model
+function renderAddress(data, parameters={}) {
+    return renderModel(
+        {
+            text: [data.title, data.country, data.postal_code, data.postal_city, data.province, data.line1, data.line2].filter(Boolean).join(', '),
         },
         parameters
     );
@@ -472,6 +496,19 @@ function renderSupplierPart(data, parameters={}) {
             text: `${data.supplier_detail.name} - ${data.SKU}`,
             textSecondary: data.part_detail.full_name,
             url: data.url || `/supplier-part/${data.pk}/`
+        },
+        parameters
+    );
+}
+
+
+// Renderer for "ProjectCode" model
+function renderProjectCode(data, parameters={}) {
+
+    return renderModel(
+        {
+            text: data.code,
+            textSecondary: data.description,
         },
         parameters
     );

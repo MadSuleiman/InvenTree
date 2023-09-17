@@ -4,6 +4,20 @@
 /* Functions for retrieving and displaying pricing data */
 
 /* globals
+    constructForm,
+    global_settings,
+    imageHoverIcon,
+    inventreeGet,
+    loadBarChart,
+    loadDoughnutChart,
+    makeEditButton,
+    makeDeleteButton,
+    randomColor,
+    renderDate,
+    renderLink,
+    shortenString,
+    withTitle,
+    wrapButtons,
 */
 
 /* exported
@@ -26,7 +40,7 @@
  * Returns the base currency used for conversion operations
  */
 function baseCurrency() {
-    return global_settings.INVENTREE_BASE_CURRENCY || 'USD';
+    return global_settings.INVENTREE_DEFAULT_CURRENCY || 'USD';
 }
 
 
@@ -51,7 +65,7 @@ function formatCurrency(value, options={}) {
     // Extract default currency information
     let currency = options.currency || global_settings.INVENTREE_DEFAULT_CURRENCY || 'USD';
 
-    // Exctract locale information
+    // Extract locale information
     let locale = options.locale || navigator.language || 'en-US';
 
     let formatter = new Intl.NumberFormat(
@@ -76,7 +90,11 @@ function formatPriceRange(price_min, price_max, options={}) {
     var p_min = price_min || price_max;
     var p_max = price_max || price_min;
 
-    var quantity = options.quantity || 1;
+    var quantity = 1;
+
+    if ('quantity' in options) {
+        quantity = options.quantity;
+    }
 
     if (p_min == null && p_max == null) {
         return null;
@@ -146,7 +164,7 @@ function calculateTotalPrice(dataset, value_func, currency_func, options={}) {
         var common_currency = true;
 
         for (var idx = 0; idx < dataset.length; idx++) {
-            var row = dataset[idx];
+            let row = dataset[idx];
 
             var row_currency = currency_func(row);
 
@@ -173,7 +191,7 @@ function calculateTotalPrice(dataset, value_func, currency_func, options={}) {
     var total = null;
 
     for (var ii = 0; ii < dataset.length; ii++) {
-        var row = dataset[ii];
+        let row = dataset[ii];
 
         // Pass the row back to the decoder
         var value = value_func(row);
@@ -274,7 +292,7 @@ function loadBomPricingChart(options={}) {
     var part = options.part;
 
     if (!part) {
-        console.error('No part provided to loadPurchasePriceHistoryTable');
+        console.error('No part provided to loadBomPricingChart');
         return;
     }
 
@@ -416,7 +434,7 @@ function loadPartSupplierPricingTable(options={}) {
     var part = options.part;
 
     if (!part) {
-        console.error('No part provided to loadPurchasePriceHistoryTable');
+        console.error('No part provided to loadPartSupplierPricingTable');
         return;
     }
 
@@ -454,7 +472,7 @@ function loadPartSupplierPricingTable(options={}) {
             data = data.sort((a, b) => (a.quantity - b.quantity));
 
             var graphLabels = Array.from(data, (x) => (`${x.part_detail.SKU} - {% trans "Quantity" %} ${x.quantity}`));
-            var graphValues = Array.from(data, (x) => (x.price / x.part_detail.pack_size));
+            var graphValues = Array.from(data, (x) => (x.price / x.part_detail.pack_quantity_native));
 
             if (chart) {
                 chart.destroy();
@@ -514,7 +532,7 @@ function loadPartSupplierPricingTable(options={}) {
                     }
 
                     // Convert to unit pricing
-                    var unit_price = row.price / row.part_detail.pack_size;
+                    var unit_price = row.price / row.part_detail.pack_quantity_native;
 
                     var html = formatCurrency(unit_price, {
                         currency: row.price_currency
@@ -607,8 +625,8 @@ function loadPriceBreakTable(table, options={}) {
 
                     let buttons = '';
 
-                    buttons += makeEditButton(`button-${name}-edit`, row.pk, `{% trans "Edit ${human_name}" %}`);
-                    buttons += makeDeleteButton(`button-${name}-delete`, row.pk, `{% trans "Delete ${human_name}" %}`);
+                    buttons += makeEditButton(`button-${name}-edit`, row.pk, `{% trans "Edit" %} ${human_name}`);
+                    buttons += makeDeleteButton(`button-${name}-delete`, row.pk, `{% trans "Delete" %} ${human_name}"`);
 
                     html += wrapButtons(buttons);
 
@@ -746,7 +764,21 @@ function loadPurchasePriceHistoryTable(options={}) {
             data = data.sort((a, b) => (a.order_detail.complete_date - b.order_detail.complete_date));
 
             var graphLabels = Array.from(data, (x) => (`${x.order_detail.reference} - ${x.order_detail.complete_date}`));
-            var graphValues = Array.from(data, (x) => (x.purchase_price / x.supplier_part_detail.pack_size));
+            var graphValues = Array.from(data, (x) => {
+                let pp = x.purchase_price;
+
+                let div = 1.0;
+
+                if (x.supplier_part_detail) {
+                    div = parseFloat(x.supplier_part_detail.pack_quantity_native);
+
+                    if (isNaN(div) || !isFinite(div)) {
+                        div = 1.0;
+                    }
+                }
+
+                return pp / div;
+            });
 
             if (chart) {
                 chart.destroy();
@@ -807,9 +839,12 @@ function loadPurchasePriceHistoryTable(options={}) {
                         return '-';
                     }
 
-                    return formatCurrency(row.purchase_price / row.supplier_part_detail.pack_size, {
-                        currency: row.purchase_price_currency
-                    });
+                    return formatCurrency(
+                        row.purchase_price / row.supplier_part_detail.pack_quantity_native,
+                        {
+                            currency: row.purchase_price_currency
+                        }
+                    );
                 }
             },
         ]

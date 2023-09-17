@@ -3,12 +3,14 @@
 from django.urls import include, path, re_path
 
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import filters, permissions, status
+from rest_framework import permissions, status
 from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 
 import plugin.serializers as PluginSerializers
 from common.api import GlobalSettingsPermissions
+from InvenTree.api import MetadataView
+from InvenTree.filters import SEARCH_ORDER_FILTER
 from InvenTree.mixins import (CreateAPI, ListAPI, RetrieveUpdateAPI,
                               RetrieveUpdateDestroyAPI, UpdateAPI)
 from InvenTree.permissions import IsSuperuser
@@ -56,11 +58,7 @@ class PluginList(ListAPI):
 
         return queryset
 
-    filter_backends = [
-        DjangoFilterBackend,
-        filters.SearchFilter,
-        filters.OrderingFilter,
-    ]
+    filter_backends = SEARCH_ORDER_FILTER
 
     filterset_fields = [
         'active',
@@ -73,6 +71,8 @@ class PluginList(ListAPI):
     ]
 
     ordering = [
+        '-active',
+        'name',
         'key',
     ]
 
@@ -123,10 +123,17 @@ class PluginInstall(CreateAPI):
 
 
 class PluginActivate(UpdateAPI):
-    """Endpoint for activating a plugin."""
+    """Endpoint for activating a plugin.
+
+    - PATCH: Activate a plugin
+
+    Pass a boolean value for the 'active' field.
+    If not provided, it is assumed to be True,
+    and the plugin will be activated.
+    """
 
     queryset = PluginConfig.objects.all()
-    serializer_class = PluginSerializers.PluginConfigEmptySerializer
+    serializer_class = PluginSerializers.PluginActivateSerializer
     permission_classes = [IsSuperuser, ]
 
     def get_object(self):
@@ -137,9 +144,8 @@ class PluginActivate(UpdateAPI):
 
     def perform_update(self, serializer):
         """Activate the plugin."""
-        instance = serializer.instance
-        instance.active = True
-        instance.save()
+
+        serializer.save()
 
 
 class PluginSettingList(ListAPI):
@@ -167,7 +173,7 @@ class PluginSettingList(ListAPI):
 
 
 def check_plugin(plugin_slug: str, plugin_pk: int) -> InvenTreePlugin:
-    """Check that a plugin for the provided slug exsists and get the config.
+    """Check that a plugin for the provided slug exists and get the config.
 
     Args:
         plugin_slug (str): Slug for plugin.
@@ -235,7 +241,7 @@ class PluginSettingDetail(RetrieveUpdateAPI):
         if key not in settings:
             raise NotFound(detail=f"Plugin '{plugin.slug}' has no setting matching '{key}'")
 
-        return PluginSetting.get_setting_object(key, plugin=plugin)
+        return PluginSetting.get_setting_object(key, plugin=plugin.plugin_config())
 
     # Staff permission required
     permission_classes = [
@@ -250,7 +256,7 @@ plugin_api_urls = [
     re_path(r'^plugins/', include([
         # Plugin settings URLs
         re_path(r'^settings/', include([
-            re_path(r'^(?P<plugin>\w+)/(?P<key>\w+)/', PluginSettingDetail.as_view(), name='api-plugin-setting-detail'),    # Used for admin interface
+            re_path(r'^(?P<plugin>[-\w]+)/(?P<key>\w+)/', PluginSettingDetail.as_view(), name='api-plugin-setting-detail'),    # Used for admin interface
             re_path(r'^.*$', PluginSettingList.as_view(), name='api-plugin-setting-list'),
         ])),
 
@@ -261,7 +267,10 @@ plugin_api_urls = [
             re_path(r'^.*$', PluginDetail.as_view(), name='api-plugin-detail'),
         ])),
 
-        # Plugin managment
+        # Metadata
+        re_path('^metadata/', MetadataView.as_view(), {'model': PluginConfig}, name='api-plugin-metadata'),
+
+        # Plugin management
         re_path(r'^install/', PluginInstall.as_view(), name='api-plugin-install'),
         re_path(r'^activate/', PluginActivate.as_view(), name='api-plugin-activate'),
 

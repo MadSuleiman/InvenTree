@@ -3,17 +3,50 @@
 
 
 /* globals
+    addClearCallback,
+    calculateTotalPrice,
+    clearEvents,
     companyFormFields,
+    constructExpandCollapseButtons,
+    constructField,
     constructForm,
+    constructOrderTableButtons,
+    endDate,
+    formatCurrency,
+    FullCalendar,
+    getFormFieldValue,
     global_settings,
+    handleFormErrors,
+    handleFormSuccess,
     imageHoverIcon,
+    initializeRelatedField,
     inventreeGet,
+    inventreeLoad,
+    inventreePut,
     launchModalForm,
+    locationDetail,
     loadTableFilters,
+    makeCopyButton,
+    makeEditButton,
+    makeDeleteButton,
     makeIconBadge,
+    makeIconButton,
+    makeProgressBar,
+    makeRemoveButton,
+    moment,
+    newBuildOrder,
+    orderParts,
+    reloadTotal,
+    renderDate,
     renderLink,
     salesOrderStatusDisplay,
     setupFilterList,
+    showAlertDialog,
+    showApiError,
+    startDate,
+    thumbnailImage,
+    updateFieldValue,
+    wrapButtons,
 */
 
 /* exported
@@ -59,6 +92,12 @@ function salesOrderFields(options={}) {
             }
         },
         customer_reference: {},
+        project_code: {
+            icon: 'fa-list',
+        },
+        order_currency: {
+            icon: 'fa-coins',
+        },
         target_date: {
             icon: 'fa-calendar-alt',
         },
@@ -77,10 +116,26 @@ function salesOrderFields(options={}) {
                 return filters;
             }
         },
+        address: {
+            icon: 'fa-map',
+            adjustFilters: function(filters) {
+                let customer = getFormFieldValue('customer', {}, {modal: options.modal});
+
+                if (customer) {
+                    filters.company = customer;
+                }
+
+                return filters;
+            }
+        },
         responsible: {
             icon: 'fa-user',
         }
     };
+
+    if (!global_settings.PROJECT_CODES_ENABLED) {
+        delete fields.project_code;
+    }
 
     return fields;
 }
@@ -149,6 +204,9 @@ function soLineItemFields(options={}) {
         notes: {
             icon: 'fa-sticky-note',
         },
+        link: {
+            icon: 'fa-link',
+        }
     };
 
     if (options.order) {
@@ -196,6 +254,9 @@ function salesOrderShipmentFields(options={}) {
         },
         link: {
             icon: 'fa-link',
+        },
+        delivery_date: {
+            icon: 'fa-calendar-check',
         }
     };
 
@@ -285,7 +346,11 @@ function completeSalesOrderShipment(shipment_id, options={}) {
                     link: {
                         value: shipment.link,
                         icon: 'fa-link',
-                    }
+                    },
+                    delivery_date: {
+                        value: shipment.delivery_date,
+                        icon: 'fa-calendar-check',
+                    },
                 },
                 preFormContent: html,
                 confirm: true,
@@ -339,7 +404,7 @@ function completePendingShipments(order_id, options={}) {
         completePendingShipmentsHelper(allocated_shipments, 0, options);
 
     } else {
-        html = `
+        let html = `
         <div class='alert alert-block alert-danger'>
         `;
 
@@ -376,7 +441,7 @@ function completePendingShipments(order_id, options={}) {
  */
 function completePendingShipmentsHelper(shipments, shipment_idx, options={}) {
     if (shipment_idx < shipments.length) {
-        completeSalseOrderShipment(shipments[shipment_idx].pk,
+        completeSalesOrderShipment(shipments[shipment_idx].pk,
             {
                 buttons: [
                     {
@@ -670,15 +735,12 @@ function loadSalesOrderTable(table, options) {
         customView: function(data) {
             return `<div id='purchase-order-calendar'></div>`;
         },
-        onRefresh: function() {
-            loadSalesOrderTable(table, options);
-        },
         onLoadSuccess: function() {
 
             if (display_mode == 'calendar') {
                 var el = document.getElementById('purchase-order-calendar');
 
-                calendar = new FullCalendar.Calendar(el, {
+                let calendar = new FullCalendar.Calendar(el, {
                     initialView: 'dayGridMonth',
                     nowIndicator: true,
                     aspectRatio: 2.5,
@@ -737,6 +799,18 @@ function loadSalesOrderTable(table, options) {
                 title: '{% trans "Description" %}',
             },
             {
+                field: 'project_code',
+                title: '{% trans "Project Code" %}',
+                switchable: global_settings.PROJECT_CODES_ENABLED,
+                visible: global_settings.PROJECT_CODES_ENABLED,
+                sortable: true,
+                formatter: function(value, row) {
+                    if (row.project_code_detail) {
+                        return `<span title='${row.project_code_detail.description}'>${row.project_code_detail.code}</span>`;
+                    }
+                }
+            },
+            {
                 sortable: true,
                 field: 'status',
                 title: '{% trans "Status" %}',
@@ -780,7 +854,7 @@ function loadSalesOrderTable(table, options) {
                 sortable: true,
                 formatter: function(value, row) {
                     return formatCurrency(value, {
-                        currency: row.total_price_currency,
+                        currency: row.order_currency,
                     });
                 }
             }
@@ -810,6 +884,9 @@ function loadSalesOrderShipmentTable(table, options={}) {
 
     // Add callbacks for expand / collapse buttons
     var prefix = options.shipped ? 'completed' : 'pending';
+
+    // Add option to show SO reference also
+    var show_so_reference = options.show_so_reference || false;
 
     $(`#${prefix}-shipments-expand`).click(function() {
         $(table).bootstrapTable('expandAllRows');
@@ -907,6 +984,21 @@ function loadSalesOrderShipmentTable(table, options={}) {
                 switchable: false,
             },
             {
+                visible: show_so_reference,
+                field: 'order_detail',
+                title: '{% trans "Sales Order" %}',
+                switchable: false,
+                formatter: function(value, row) {
+                    var html = renderLink(row.order_detail.reference, `/order/sales-order/${row.order}/`);
+
+                    if (row.overdue) {
+                        html += makeIconBadge('fa-calendar-times icon-red', '{% trans "Order is overdue" %}');
+                    }
+
+                    return html;
+                },
+            },
+            {
                 field: 'reference',
                 title: '{% trans "Shipment Reference" %}',
                 switchable: false,
@@ -933,6 +1025,18 @@ function loadSalesOrderShipmentTable(table, options={}) {
                         return renderDate(value);
                     } else {
                         return '<em>{% trans "Not shipped" %}</em>';
+                    }
+                }
+            },
+            {
+                field: 'delivery_date',
+                title: '{% trans "Delivery Date" %}',
+                sortable: true,
+                formatter: function(value, row) {
+                    if (value) {
+                        return renderDate(value);
+                    } else {
+                        return '<em>{% trans "Unknown" %}</em>';
                     }
                 }
             },
@@ -1053,9 +1157,8 @@ function allocateStockToSalesOrder(order_id, line_items, options={}) {
     var table_entries = '';
 
     for (var idx = 0; idx < line_items.length; idx++ ) {
-        var line_item = line_items[idx];
-
-        var remaining = 0;
+        let line_item = line_items[idx];
+        let remaining = Math.max(0, line_item.quantity - line_item.allocated);
 
         table_entries += renderLineItemRow(line_item, remaining);
     }
@@ -1205,6 +1308,8 @@ function allocateStockToSalesOrder(order_id, line_items, options={}) {
                             part_detail: true,
                             location_detail: true,
                             available: true,
+                            salable: true,
+                            active: true,
                         },
                         model: 'stockitem',
                         required: true,
@@ -1222,7 +1327,7 @@ function allocateStockToSalesOrder(order_id, line_items, options={}) {
                             var available = Math.max((data.quantity || 0) - (data.allocated || 0), 0);
 
                             // Remaining quantity to be allocated?
-                            var remaining = Math.max(line_item.quantity - line_item.shipped - line_item.allocated, 0);
+                            var remaining = Math.max(line_item.quantity - line_item.allocated, 0);
 
                             // Maximum amount that we need
                             var desired = Math.min(available, remaining);
@@ -1387,6 +1492,7 @@ function loadSalesOrderAllocationTable(table, options={}) {
             },
             {
                 field: 'item',
+                switchable: false,
                 title: '{% trans "Stock Item" %}',
                 formatter: function(value, row) {
                     // Render a link to the particular stock item
@@ -1409,13 +1515,25 @@ function loadSalesOrderAllocationTable(table, options={}) {
                 title: '{% trans "Quantity" %}',
                 sortable: true,
             },
+            {
+                field: 'shipment_date',
+                title: '{% trans "Shipped" %}',
+                sortable: true,
+                formatter: function(value, row) {
+                    if (value) {
+                        return renderDate(value);
+                    } else {
+                        return `<em>{% trans "Not shipped" %}</em>`;
+                    }
+                }
+            }
         ]
     });
 }
 
 
 /**
- * Display an "allocations" sub table, showing stock items allocated againt a sales order
+ * Display an "allocations" sub table, showing stock items allocated against a sales order
  * @param {*} index
  * @param {*} row
  * @param {*} element
@@ -1438,7 +1556,7 @@ function showAllocationSubTable(index, row, element, options) {
 
             var pk = $(this).attr('pk');
 
-            // Edit the sales order alloction
+            // Edit the sales order allocation
             constructForm(
                 `/api/order/so-allocation/${pk}/`,
                 {
@@ -1483,11 +1601,8 @@ function showAllocationSubTable(index, row, element, options) {
                 field: 'allocated',
                 title: '{% trans "Stock Item" %}',
                 formatter: function(value, row, index, field) {
-                    var text = '';
-
-                    var item = row.item_detail;
-
-                    var text = `{% trans "Quantity" %}: ${row.quantity}`;
+                    let item = row.item_detail;
+                    let text = `{% trans "Quantity" %}: ${row.quantity}`;
 
                     if (item && item.serial != null && row.quantity == 1) {
                         text = `{% trans "Serial Number" %}: ${item.serial}`;
@@ -1623,12 +1738,12 @@ function loadSalesOrderLineItemTable(table, options={}) {
     options.params = options.params || {};
 
     if (!options.order) {
-        console.error('function called without order ID');
+        console.error('loadSalesOrderLineItemTable called without order ID');
         return;
     }
 
     if (!options.status) {
-        console.error('function called without order status');
+        console.error('loadSalesOrderLineItemTable called without order status');
         return;
     }
 
@@ -1687,6 +1802,12 @@ function loadSalesOrderLineItemTable(table, options={}) {
             footerFormatter: function() {
                 return '{% trans "Total" %}';
             },
+        },
+        {
+            sortable: false,
+            field: 'part_detail.description',
+            title: '{% trans "Description" %}',
+            switchable: true,
         },
         {
             sortable: true,
@@ -1768,17 +1889,20 @@ function loadSalesOrderLineItemTable(table, options={}) {
                 field: 'stock',
                 title: '{% trans "Available Stock" %}',
                 formatter: function(value, row) {
-                    var available = row.available_stock;
-                    var required = Math.max(row.quantity - row.allocated - row.shipped, 0);
 
-                    var html = '';
+                    let available = row.available_stock + row.available_variant_stock;
+                    let required = Math.max(row.quantity - row.allocated - row.shipped, 0);
+
+                    let html = '';
 
                     if (available > 0) {
-                        var url = `/part/${row.part}/?display=part-stock`;
+                        let url = `/part/${row.part}/?display=part-stock`;
 
-                        var text = available;
+                        html = renderLink(available, url);
 
-                        html = renderLink(text, url);
+                        if (row.available_variant_stock && row.available_variant_stock > 0) {
+                            html += makeIconBadge('fa-info-circle icon-blue', '{% trans "Includes variant stock" %}');
+                        }
                     } else {
                         html += `<span class='badge rounded-pill bg-danger'>{% trans "No Stock Available" %}</span>`;
                     }
@@ -1856,6 +1980,16 @@ function loadSalesOrderLineItemTable(table, options={}) {
     });
 
     columns.push({
+        field: 'link',
+        title: '{% trans "Link" %}',
+        formatter: function(value) {
+            if (value) {
+                return renderLink(value, value);
+            }
+        }
+    });
+
+    columns.push({
         field: 'buttons',
         switchable: false,
         formatter: function(value, row, index, field) {
@@ -1866,7 +2000,7 @@ function loadSalesOrderLineItemTable(table, options={}) {
             if (row.part && row.part_detail) {
                 let part = row.part_detail;
 
-                if (options.allow_edit && !row.shipped) {
+                if (options.allow_edit && (row.shipped < row.quantity)) {
                     if (part.trackable) {
                         buttons += makeIconButton('fa-hashtag icon-green', 'button-add-by-sn', pk, '{% trans "Allocate serial numbers" %}');
                     }
@@ -1893,10 +2027,10 @@ function loadSalesOrderLineItemTable(table, options={}) {
 
                 var title = '{% trans "Delete line item" %}';
 
-                if (!!row.shipped) {
+                if (row.shipped) {
                     delete_disabled = true;
                     title = '{% trans "Cannot be deleted as items have been shipped" %}';
-                } else if (!!row.allocated) {
+                } else if (row.allocated) {
                     delete_disabled = true;
                     title = '{% trans "Cannot be deleted as items have been allocated" %}';
                 }

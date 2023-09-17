@@ -17,16 +17,20 @@ import order.models
 import part.filters
 import stock.models
 import stock.serializers
-from company.serializers import (CompanyBriefSerializer, ContactSerializer,
+from common.serializers import ProjectCodeSerializer
+from company.serializers import (AddressBriefSerializer,
+                                 CompanyBriefSerializer, ContactSerializer,
                                  SupplierPartSerializer)
-from InvenTree.helpers import extract_serial_numbers, normalize, str2bool
+from InvenTree.helpers import (extract_serial_numbers, hash_barcode, normalize,
+                               str2bool)
 from InvenTree.serializers import (InvenTreeAttachmentSerializer,
                                    InvenTreeCurrencySerializer,
                                    InvenTreeDecimalField,
                                    InvenTreeModelSerializer,
                                    InvenTreeMoneySerializer)
-from InvenTree.status_codes import (PurchaseOrderStatus, ReturnOrderStatus,
-                                    SalesOrderStatus, StockStatus)
+from InvenTree.status_codes import (PurchaseOrderStatusGroups,
+                                    ReturnOrderStatus, SalesOrderStatusGroups,
+                                    StockStatus)
 from part.serializers import PartBriefSerializer
 from users.serializers import OwnerSerializer
 
@@ -39,7 +43,13 @@ class TotalPriceMixin(serializers.Serializer):
         read_only=True,
     )
 
-    total_price_currency = InvenTreeCurrencySerializer(read_only=True)
+    order_currency = InvenTreeCurrencySerializer(
+        allow_blank=True,
+        allow_null=True,
+        required=False,
+        label=_('Order Currency'),
+        help_text=_('Currency for this order (leave blank to use company default)'),
+    )
 
 
 class AbstractOrderSerializer(serializers.Serializer):
@@ -63,8 +73,16 @@ class AbstractOrderSerializer(serializers.Serializer):
     # Detail for responsible field
     responsible_detail = OwnerSerializer(source='responsible', read_only=True, many=False)
 
+    # Detail for project code field
+    project_code_detail = ProjectCodeSerializer(source='project_code', read_only=True, many=False)
+
+    # Detail for address field
+    address_detail = AddressBriefSerializer(source='address', many=False, read_only=True)
+
     # Boolean field indicating if this order is overdue (Note: must be annotated)
     overdue = serializers.BooleanField(required=False, read_only=True)
+
+    barcode_hash = serializers.CharField(read_only=True)
 
     def validate_reference(self, reference):
         """Custom validation for the reference field"""
@@ -93,14 +111,19 @@ class AbstractOrderSerializer(serializers.Serializer):
             'description',
             'line_items',
             'link',
+            'project_code',
+            'project_code_detail',
             'reference',
             'responsible',
             'responsible_detail',
             'contact',
             'contact_detail',
+            'address',
+            'address_detail',
             'status',
             'status_text',
             'notes',
+            'barcode_hash',
             'overdue',
         ] + extra_fields
 
@@ -131,6 +154,7 @@ class AbstractExtraLineMeta:
 
     fields = [
         'pk',
+        'description',
         'quantity',
         'reference',
         'notes',
@@ -139,6 +163,7 @@ class AbstractExtraLineMeta:
         'order_detail',
         'price',
         'price_currency',
+        'link',
     ]
 
 
@@ -157,7 +182,7 @@ class PurchaseOrderSerializer(TotalPriceMixin, AbstractOrderSerializer, InvenTre
             'supplier_detail',
             'supplier_reference',
             'total_price',
-            'total_price_currency',
+            'order_currency',
         ])
 
         read_only_fields = [
@@ -165,6 +190,11 @@ class PurchaseOrderSerializer(TotalPriceMixin, AbstractOrderSerializer, InvenTre
             'complete_date',
             'creation_date',
         ]
+
+        extra_kwargs = {
+            'supplier': {'required': True},
+            'order_currency': {'required': False},
+        }
 
     def __init__(self, *args, **kwargs):
         """Initialization routine for the serializer"""
@@ -304,6 +334,7 @@ class PurchaseOrderLineItemSerializer(InvenTreeModelSerializer):
             'destination_detail',
             'target_date',
             'total_price',
+            'link',
         ]
 
     def __init__(self, *args, **kwargs):
@@ -357,7 +388,7 @@ class PurchaseOrderLineItemSerializer(InvenTreeModelSerializer):
 
     def validate_purchase_order(self, purchase_order):
         """Validation for the 'purchase_order' field"""
-        if purchase_order.status not in PurchaseOrderStatus.OPEN:
+        if purchase_order.status not in PurchaseOrderStatusGroups.OPEN:
             raise ValidationError(_('Order is not open'))
 
         return purchase_order
@@ -494,14 +525,14 @@ class PurchaseOrderLineItemReceiveSerializer(serializers.Serializer):
     )
 
     status = serializers.ChoiceField(
-        choices=list(StockStatus.items()),
-        default=StockStatus.OK,
+        choices=StockStatus.items(),
+        default=StockStatus.OK.value,
         label=_('Status'),
     )
 
     barcode = serializers.CharField(
-        label=_('Barcode Hash'),
-        help_text=_('Unique identifier field'),
+        label=_('Barcode'),
+        help_text=_('Scanned barcode'),
         default='',
         required=False,
         allow_null=True,
@@ -514,7 +545,9 @@ class PurchaseOrderLineItemReceiveSerializer(serializers.Serializer):
         if not barcode or barcode.strip() == '':
             return None
 
-        if stock.models.StockItem.objects.filter(barcode_hash=barcode).exists():
+        barcode_hash = hash_barcode(barcode)
+
+        if stock.models.StockItem.lookup_barcode(barcode_hash) is not None:
             raise ValidationError(_('Barcode is already in use'))
 
         return barcode
@@ -532,14 +565,12 @@ class PurchaseOrderLineItemReceiveSerializer(serializers.Serializer):
         serial_numbers = data.get('serial_numbers', '').strip()
 
         base_part = line_item.part.part
-        pack_size = line_item.part.pack_size
-
-        pack_quantity = pack_size * quantity
+        base_quantity = line_item.part.base_quantity(quantity)
 
         # Does the quantity need to be "integer" (for trackable parts?)
         if base_part.trackable:
 
-            if Decimal(pack_quantity) != int(pack_quantity):
+            if Decimal(base_quantity) != int(base_quantity):
                 raise ValidationError({
                     'quantity': _('An integer quantity must be provided for trackable parts'),
                 })
@@ -550,7 +581,7 @@ class PurchaseOrderLineItemReceiveSerializer(serializers.Serializer):
                 # Pass the serial numbers through to the parent serializer once validated
                 data['serials'] = extract_serial_numbers(
                     serial_numbers,
-                    pack_quantity,
+                    base_quantity,
                     base_part.get_latest_serial_number()
                 )
             except DjangoValidationError as e:
@@ -689,7 +720,7 @@ class SalesOrderSerializer(TotalPriceMixin, AbstractOrderSerializer, InvenTreeMo
             'customer_reference',
             'shipment_date',
             'total_price',
-            'total_price_currency',
+            'order_currency',
         ])
 
         read_only_fields = [
@@ -697,6 +728,10 @@ class SalesOrderSerializer(TotalPriceMixin, AbstractOrderSerializer, InvenTreeMo
             'creation_date',
             'shipment_date',
         ]
+
+        extra_kwargs = {
+            'order_currency': {'required': False},
+        }
 
     def __init__(self, *args, **kwargs):
         """Initialization routine for the serializer"""
@@ -827,6 +862,7 @@ class SalesOrderLineItemSerializer(InvenTreeModelSerializer):
             'allocated',
             'allocations',
             'available_stock',
+            'available_variant_stock',
             'customer_detail',
             'quantity',
             'reference',
@@ -840,6 +876,7 @@ class SalesOrderLineItemSerializer(InvenTreeModelSerializer):
             'sale_price_currency',
             'shipped',
             'target_date',
+            'link',
         ]
 
     def __init__(self, *args, **kwargs):
@@ -877,7 +914,7 @@ class SalesOrderLineItemSerializer(InvenTreeModelSerializer):
         queryset = queryset.annotate(
             overdue=Case(
                 When(
-                    Q(order__status__in=SalesOrderStatus.OPEN) & order.models.SalesOrderLineItem.OVERDUE_FILTER, then=Value(True, output_field=BooleanField()),
+                    Q(order__status__in=SalesOrderStatusGroups.OPEN) & order.models.SalesOrderLineItem.OVERDUE_FILTER, then=Value(True, output_field=BooleanField()),
                 ),
                 default=Value(False, output_field=BooleanField()),
             )
@@ -898,6 +935,26 @@ class SalesOrderLineItemSerializer(InvenTreeModelSerializer):
             )
         )
 
+        # Filter for "variant" stock: Variant stock items must be salable and active
+        variant_stock_query = part.filters.variant_stock_query(reference='part__').filter(
+            part__salable=True,
+            part__active=True
+        )
+
+        # Also add in available "variant" stock
+        queryset = queryset.alias(
+            variant_stock_total=part.filters.annotate_variant_quantity(variant_stock_query, reference='quantity'),
+            variant_bo_allocations=part.filters.annotate_variant_quantity(variant_stock_query, reference='sales_order_allocations__quantity'),
+            variant_so_allocations=part.filters.annotate_variant_quantity(variant_stock_query, reference='allocations__quantity'),
+        )
+
+        queryset = queryset.annotate(
+            available_variant_stock=ExpressionWrapper(
+                F('variant_stock_total') - F('variant_bo_allocations') - F('variant_so_allocations'),
+                output_field=models.DecimalField(),
+            )
+        )
+
         return queryset
 
     customer_detail = CompanyBriefSerializer(source='order.customer', many=False, read_only=True)
@@ -908,6 +965,7 @@ class SalesOrderLineItemSerializer(InvenTreeModelSerializer):
     # Annotated fields
     overdue = serializers.BooleanField(required=False, read_only=True)
     available_stock = serializers.FloatField(read_only=True)
+    available_variant_stock = serializers.FloatField(read_only=True)
 
     quantity = InvenTreeDecimalField()
 
@@ -934,6 +992,7 @@ class SalesOrderShipmentSerializer(InvenTreeModelSerializer):
             'order_detail',
             'allocations',
             'shipment_date',
+            'delivery_date',
             'checked_by',
             'reference',
             'tracking_number',
@@ -957,6 +1016,7 @@ class SalesOrderShipmentCompleteSerializer(serializers.ModelSerializer):
 
         fields = [
             'shipment_date',
+            'delivery_date',
             'tracking_number',
             'invoice_number',
             'link',
@@ -1003,6 +1063,7 @@ class SalesOrderShipmentCompleteSerializer(serializers.ModelSerializer):
             invoice_number=data.get('invoice_number', shipment.invoice_number),
             link=data.get('link', shipment.link),
             shipment_date=shipment_date,
+            delivery_date=data.get('delivery_date', shipment.delivery_date),
         )
 
 
@@ -1415,7 +1476,7 @@ class SalesOrderAttachmentSerializer(InvenTreeAttachmentSerializer):
         ])
 
 
-class ReturnOrderSerializer(AbstractOrderSerializer, InvenTreeModelSerializer):
+class ReturnOrderSerializer(AbstractOrderSerializer, TotalPriceMixin, InvenTreeModelSerializer):
     """Serializer for the ReturnOrder model class"""
 
     class Meta:
@@ -1427,6 +1488,8 @@ class ReturnOrderSerializer(AbstractOrderSerializer, InvenTreeModelSerializer):
             'customer',
             'customer_detail',
             'customer_reference',
+            'order_currency',
+            'total_price',
         ])
 
         read_only_fields = [
@@ -1614,6 +1677,7 @@ class ReturnOrderLineItemSerializer(InvenTreeModelSerializer):
             'reference',
             'notes',
             'target_date',
+            'link',
         ]
 
     def __init__(self, *args, **kwargs):
